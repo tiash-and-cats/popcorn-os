@@ -14,6 +14,7 @@ Prerequisites:
     - GMake
     - QEMU
     - cURL
+This was only tested with Windows with MSVC. Your mileage may vary, and if you find a way to fix it, please submit a pull request!
 
 To compile it, simply clone the repo with all prerequisites and run:
 ``` bash
@@ -31,4 +32,4 @@ And then it will run normally. It will delete all previous build artifacts and c
 ## Application format
 
 Apps are packaged as flat binaries (`.bin`) that have a function at address 0 which takes `(pop_Services* svc, int argc, CHAR16** argv)`.
-This function is commonly called `pop_main`.
+This function is commonly called `pop_main`. The service table is very documented in `popcorn.h`.
