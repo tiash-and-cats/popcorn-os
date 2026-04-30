@@ -1,0 +1,18 @@
+# OVMF firmware
+OVMF.fd
+OVMF_CODE.fd
+OVMF_VARS.fd
+
+# Dependencies
+caramelized/stb_truetype.h
+vsnprintf.c
+
+# Build artifacts
+uefi/
+*/*.exe
+*/*.obj
+*/*.o
+*/*.pdb
+
+# gnu-efi includes
+include/

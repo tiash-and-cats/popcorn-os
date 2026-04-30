@@ -1,0 +1,421 @@
+#include <efi.h>
+#include <efilib.h>
+#include "popcorn.h"
+
+EFI_GUID gEfiLoadedImageProtocolGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+EFI_GUID gEfiSimpleFileSystemProtocolGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+EFI_GUID gEfiFileInfoGuid = EFI_FILE_INFO_ID;
+
+EFI_SYSTEM_TABLE *gST;
+EFI_BOOT_SERVICES *gBS;
+EFI_RUNTIME_SERVICES *gRT;
+EFI_HANDLE *ImageHandle;
+
+extern popf_File*  pop_API  popfk_fileopen(pop_Services* svc, const CHAR16* path, popf_FileMode mode);
+extern CHAR16*     pop_API  popfk_normpath(pop_Services* svc, const CHAR16* path);
+extern BOOL        pop_API  popfk_direxists(pop_Services* svc, const CHAR16* path);
+extern popl_Node*  pop_API  popfk_dirlist(pop_Services* svc, const CHAR16* path);
+
+extern popl_Node*  pop_API  poplk_newnode(popl_ListServices* svc, void* data);
+extern void        pop_API  poplk_freelist(popl_ListServices* slist, popl_Node* node);
+extern void        pop_API  poplk_append(popl_ListServices* slist, popl_Node* node, void* data);
+
+extern int         pop_API  popgk_init(popg_GraphicsServices* sgfx);
+extern void        pop_API  popgk_blit(popg_GraphicsServices* sgfx);
+extern void        pop_API  popgk_putpixel(popg_GraphicsServices* sgfx, unsigned int x, unsigned int y,
+                                           unsigned char r, unsigned char g, unsigned char b);
+extern popg_Pixel  pop_API  popgk_getpixel(popg_GraphicsServices* sgfx, unsigned int x, unsigned int y);
+extern void        pop_API  popgk_deinit(popg_GraphicsServices* sgfx);
+
+// Kernel services
+void pop_API popk_print(pop_Services* svc, const CHAR16* msg) {
+    if (!svc || !svc->console) {
+        gST->ConOut->OutputString(gST->ConOut, msg);
+    } else {
+        svc->console->write(svc->console, msg);
+        // gST->ConOut->OutputString(gST->ConOut, msg);
+    }
+}
+
+void* pop_API popk_memalloc(pop_Services* svc, unsigned int size) {
+    void* buf = NULL;
+    gBS->AllocatePool(EfiLoaderData, size, &buf);
+    return buf;
+}
+
+void pop_API popk_memfree(pop_Services* svc, void* buf) {
+    gBS->FreePool(buf);
+}
+
+// Read a line of input from the UEFI console into a wide string buffer
+CHAR16* pop_API popk_readline(pop_Services* svc) {
+    if (!svc || !svc->console) {
+        EFI_INPUT_KEY Key;
+        UINTN Index;
+        size_t cap = 128;
+        size_t len = 0;
+        CHAR16* buf = svc->memalloc(svc, cap * sizeof(CHAR16));
+    
+        while (1) {
+            // Wait for key
+            gBS->WaitForEvent(1, &gST->ConIn->WaitForKey, &Index);
+            gST->ConIn->ReadKeyStroke(gST->ConIn, &Key);
+    
+            if (Key.UnicodeChar == L'\r') { // Enter pressed
+                buf[len] = L'\0';
+                popk_print(svc, L"\r\n"); // echo newline
+                return buf;
+            } else if (Key.UnicodeChar == L'\b') { // Backspace
+                if (len > 0) {
+                    len--;
+                    popk_print(svc, L"\b");
+                }
+            } else if (Key.UnicodeChar != 0) {
+                // Echo character
+                CHAR16 tmp[2] = { Key.UnicodeChar, L'\0' };
+                popk_print(svc, tmp);
+    
+                // Append to buffer
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    CHAR16* newbuf = svc->memalloc(svc, cap * sizeof(CHAR16));
+                    for (size_t i = 0; i < len; i++) newbuf[i] = buf[i];
+                    svc->memfree(svc, buf);
+                    buf = newbuf;
+                }
+                buf[len++] = Key.UnicodeChar;
+            }
+        }
+    } else {
+        return svc->console->read(svc->console);
+    }
+}
+
+void pop_API popk_println(pop_Services* svc, const CHAR16* msg) {
+    if (!svc) {
+        gST->ConOut->OutputString(gST->ConOut, (CHAR16*)msg);
+        gST->ConOut->OutputString(gST->ConOut, L"\r\n");
+    } else {
+        svc->console->write(svc->console, (void*)msg);
+        svc->console->write(svc->console, (void*)L"\r\n");
+    }
+}
+
+// Loader function
+typedef int (pop_API *pop_Entry)(pop_Services*, int, CHAR16**);
+
+typedef struct {
+    char magic[3];     // "POP"
+    uint32_t entry;    // 4-byte entry offset
+} pope_MinipopHdr;
+
+int pope_minipop(int argc, CHAR16** argv, pop_Services* svc) {
+    CHAR16* fname = argv[0];
+
+    // Read file into memory
+    popf_File* f = svc->fileopen(svc, fname, (popf_FileMode){ .read = TRUE, .bytes = TRUE });
+    if (!f) return pop_ENOENTY;
+    uint8_t* mem = (uint8_t*)f->read(f);
+    f->close(f);
+
+    // Parse header manually
+    pope_MinipopHdr hdr;
+    for (unsigned int i = 0; i < sizeof(hdr.magic); i++) {
+        hdr.magic[i] = mem[i];
+    }
+    hdr.entry = (uint32_t)mem[3] |
+                ((uint32_t)mem[4] << 8) |
+                ((uint32_t)mem[5] << 16) |
+                ((uint32_t)mem[6] << 24);
+
+    // Verify magic
+    if (!(hdr.magic[0] == 'P' && hdr.magic[1] == 'O' && hdr.magic[2] == 'P')) {
+        svc->memfree(svc, mem);
+        return pop_ENOEXEC;
+    }
+
+    // Jump into app
+    pop_Entry entry = (pop_Entry)(mem + hdr.entry);
+    int res = entry(svc, argc, argv);
+
+    svc->memfree(svc, mem);
+    return res;
+}
+
+int pope_bin(int argc, CHAR16** argv, pop_Services* svc) {
+    CHAR16* fname = argv[0];
+
+    // Read file into memory
+    popf_File* f = svc->fileopen(svc, fname, (popf_FileMode){ .read = 1, .bytes = 1 });
+    if (!f) return pop_ENOENTY;
+    void* mem = f->read(f);
+    f->close(f);
+
+    // Jump into app
+    pop_Entry entry = (pop_Entry)mem;
+    int res = entry(svc, argc, argv);
+
+    svc->memfree(svc, mem);
+    return res;
+}
+
+int pope_exec(pop_Services* svc, pop_Services* svc2, int argc, CHAR16** argv) {
+    popf_File* f = svc->fileopen(svc, argv[0], (popf_FileMode){ .read = 1 });
+    if (!f) return pop_ENOENTY;
+
+    CHAR16* txt = (CHAR16*)f->read(f);
+    if (txt && txt[0] == 0xFEFF && txt[1] == L'#' && txt[2] == L'!') {
+        CHAR16* prg = svc->memalloc(svc, 256 * sizeof(CHAR16));
+        int i = 0;
+        while (i < 255 && txt[i+2] != L'\n' && txt[i+2] != 0) {
+            prg[i] = txt[i+2];
+            i++;
+        }
+        prg[i] = 0; // NUL terminate
+
+        CHAR16** argv2 = svc->memalloc(svc, (argc + 1) * sizeof(CHAR16*));
+        argv2[0] = prg;
+        for (int j = 0; j < argc; j++) {
+            argv2[j+1] = argv[j];
+        }
+
+        int code = pope_bin(argc + 1, argv2, svc2);
+
+        svc->memfree(svc, argv2);
+        svc->memfree(svc, prg);
+        svc->memfree(svc, txt);
+        f->close(f);
+        return code;
+    }
+
+    int code;
+    if ((code = pope_minipop(argc, argv, svc2)) == pop_ENOEXEC) {
+        code = pope_bin(argc, argv, svc2);
+    }
+    svc->memfree(svc, txt);
+    f->close(f);
+    return code;
+}
+
+static inline int wstrlen(const CHAR16* a) {
+    const CHAR16* start = a;
+    while (*a) a++;
+    return (int)(a - start);
+}
+
+int popk_pwait(pop_Services* svc, pop_Services* svc2, int argc, CHAR16** argv) {
+    const CHAR16* prefixes[] = { L"", L"/system/" };
+    const CHAR16* suffixes[] = { L"", L".bin", L".pop" };
+    int prefixlen = 2;
+    int suffixlen = 3;
+
+    for (int i = 0; i < prefixlen; i++) {
+        for (int k = 0; k < suffixlen; k++) {
+            // Build full path: prefix + argv[0] + suffix
+            int prelen = wstrlen(prefixes[i]);
+            int namelen = wstrlen(argv[0]);
+            int suflen = wstrlen(suffixes[k]);
+
+            CHAR16* fullpath = svc->memalloc(svc, (prelen + namelen + suflen + 1) * sizeof(CHAR16));
+            int pos = 0;
+            for (int j = 0; j < prelen; j++) fullpath[pos++] = prefixes[i][j];
+            for (int j = 0; j < namelen; j++) fullpath[pos++] = argv[0][j];
+            for (int j = 0; j < suflen; j++) fullpath[pos++] = suffixes[k][j];
+            fullpath[pos] = 0;
+
+            // Build argv2 with fullpath replacing argv[0]
+            CHAR16** argv2 = svc->memalloc(svc, argc * sizeof(CHAR16*));
+            argv2[0] = fullpath;
+            for (int j = 1; j < argc; j++) argv2[j] = argv[j];
+
+            int code = pope_exec(svc, svc2, argc, argv2);
+
+            svc->memfree(svc, argv2);
+            svc->memfree(svc, fullpath);
+
+            if (code != pop_ENOENTY) {
+                return code; // success or other error code
+            }
+        }
+    }
+
+    return pop_ENOENTY; // not found in any prefix/suffix combination
+}
+
+int popk_setcwd(pop_Services* svc, const CHAR16* path) {
+    if (!svc->direxists(svc, path)) {
+        return pop_ENOENTY;
+    }
+    svc->curdir = svc->normpath(svc, path);
+    return 0;
+}
+
+// Convert integer to CHAR16 string and print
+void pop_API popk_printint(pop_Services* svc, int value) {
+    CHAR16 buf[32]; // enough for 32-bit int
+    int i = 0;
+
+    // Handle zero explicitly
+    if (value == 0) {
+        buf[i++] = L'0';
+    } else {
+        // Handle negative
+        if (value < 0) {
+            popk_print(svc, L"-");
+            value = -value;
+        }
+
+        // Convert digits in reverse
+        CHAR16 tmp[32];
+        int j = 0;
+        while (value > 0) {
+            tmp[j++] = (CHAR16)(L'0' + (value % 10));
+            value /= 10;
+        }
+
+        // Reverse into buf
+        while (j > 0) {
+            buf[i++] = tmp[--j];
+        }
+    }
+
+    buf[i] = 0; // NUL terminate
+    popk_print(svc, buf);
+}
+
+void popk_perrno(pop_Services* svc, int errcode) {
+    switch (errcode) {
+        case pop_SUCCESS: 
+            svc->println(svc, L"The operation completed successfully.");
+            break;
+        case pop_EEXISTS: 
+            svc->println(svc, L"The specified file or directory already exists.");
+            break;
+        case pop_ENOPERM: 
+            svc->println(svc, L"Permission is required to complete the operation.");
+            break;
+        case pop_ENOENTY: 
+            svc->println(svc, L"The specified file or directory was not found.");
+            break;
+        case pop_EUEFIPR: 
+            svc->println(svc, L"UEFI firmware error.");
+            break;
+        case pop_E2LPATH: 
+            svc->println(svc, L"The specified pathname is too long.");
+            break;
+        default:
+            svc->print(svc, L"Unspecified error. (");
+            svc->printint(svc, errcode);
+            svc->println(svc, L")");
+    }
+}
+
+void popk_freesvc(pop_Services* svc, pop_Services* svc2) {
+    if (svc2->slist) popk_memfree(svc, svc2->slist);
+    if (svc2->sgfx) popk_memfree(svc, svc2->sgfx);
+    popk_memfree(svc, svc2);
+}
+
+void popk_curmove(pop_Services* svc, unsigned int x, unsigned int y) {
+    gST->ConOut->SetCursorPosition(gST->ConOut, x, y);
+}
+
+pop_Services* popk_newsvc(pop_Services* svc) {
+    pop_Services* svc2 = popk_memalloc(svc, sizeof(pop_Services));
+    
+    svc2->print = popk_print;               
+    svc2->memalloc = popk_memalloc;
+    svc2->memfree = popk_memfree;
+    svc2->readline = popk_readline;
+    svc2->newsvc = popk_newsvc;
+    svc2->pwait = popk_pwait; 
+    svc2->fileopen = popfk_fileopen;
+    svc2->direxists = popfk_direxists;
+    svc2->dirmake = /*popfk_dirmake*/NULL;
+    svc2->console = NULL;
+    svc2->curdir = svc ? svc->curdir : L"/";
+    svc2->normpath = popfk_normpath;
+    svc2->setcwd = popk_setcwd;
+    svc2->println = popk_println;
+    svc2->errcode = 0;
+    svc2->perrno = popk_perrno;
+    svc2->printint = popk_printint;
+    svc2->slist = NULL;
+    svc2->dirlist = popfk_dirlist;
+    svc2->freesvc = popk_freesvc;
+    svc2->sgfx = NULL;
+    svc2->termsize = NULL;
+    svc2->curmove = popk_curmove;
+    
+    svc2->console = svc ? svc->console : popfk_fileopen(svc2, L"/virt/dev/con", (popf_FileMode){ 
+        .read = 0, .write = 1, .create = 0, .bytes = 0 
+    });
+    popl_ListServices* slist = svc2->memalloc(svc2, sizeof(popl_ListServices));
+    if (slist) {
+        slist->svc      = svc2;
+        slist->newnode  = poplk_newnode;
+        slist->freelist = poplk_freelist;
+        slist->append   = poplk_append;
+    }
+    svc2->slist = slist;
+    popg_GraphicsServices* sgfx = svc2->memalloc(svc2, sizeof(popg_GraphicsServices));
+    if (sgfx) {
+        sgfx->svc      = svc2;
+        sgfx->frame    = NULL;
+        sgfx->w        = 0;
+        sgfx->h        = 0;
+        sgfx->init     = popgk_init;
+        sgfx->blit     = popgk_blit;
+        sgfx->shndl    = NULL;
+        sgfx->putpixel = popgk_putpixel;
+        sgfx->getpixel = popgk_getpixel;
+        sgfx->deinit   = popgk_deinit;
+    }
+    svc2->sgfx = sgfx;
+    return svc2;
+}
+
+// UEFI uses CHAR16 (UTF-16 code units) for strings
+INTN wcscmp(const CHAR16 *s1, const CHAR16 *s2) {
+    while (*s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+    }
+    return (INTN)(*s1 - *s2);
+}
+
+EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandleA, EFI_SYSTEM_TABLE *SystemTable) {
+    gST = SystemTable;             // System Table
+    gBS = SystemTable->BootServices; // Boot Services
+    gRT = SystemTable->RuntimeServices; // Runtime Services
+    ImageHandle = ImageHandleA; // Image Handle
+    UINTN Index;
+
+    gST->ConOut->EnableCursor(gST->ConOut, TRUE);
+    gST->ConOut->SetCursorPosition(gST->ConOut, 0, 0);
+    
+    CHAR16* args[] = { L"/system/cmd.bin" };
+    pop_Services* svc = popk_newsvc(NULL);
+
+    svc->sgfx->init(svc->sgfx);
+    for (int i = 0; i < (svc->sgfx->w * svc->sgfx->h); i++) {
+        svc->sgfx->frame[i] = (popg_Pixel){ .r = 0, .g = 0, .b = 0 };
+    }
+    svc->sgfx->blit(svc->sgfx);
+    svc->sgfx->deinit(svc->sgfx);
+    svc->curmove(svc, 0, 0);
+    
+    int res = popk_pwait(svc, svc, 1, args);
+    if (res == pop_ENOENTY) {
+        svc->println(NULL, L"Popcorn OS had trouble starting up.");
+    }
+    
+shutdown:
+    popk_freesvc(NULL, svc);
+    popk_println(NULL, L"It is now safe to turn off your computer.");
+    popk_println(NULL, L"Press any key to continue the next boot option.");
+
+    gBS->WaitForEvent(1, &gST->ConIn->WaitForKey, &Index);
+
+    return EFI_SUCCESS;
+}
