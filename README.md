@@ -1,6 +1,7 @@
 # Popcorn OS
 
 Popcorn OS is a simple, single-threaded OS with a monolithic kernel. Unlike many hobby OSes, it reads apps from disk! It currently has:
+
     - A command processor
     - Simple graphical demos
     - A very hopeful maintainer
@@ -10,10 +11,12 @@ It is built as a UEFI application and uses a service table instead of traditiona
 ## Compilation
 
 Prerequisites:
+
     - MSVC or GCC
     - GMake
     - QEMU
     - cURL
+    
 This was only tested with Windows with MSVC. Your mileage may vary, and if you find a way to fix it, please submit a pull request!
 
 To compile it, simply clone the repo with all prerequisites and run:

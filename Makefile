@@ -41,6 +41,8 @@ define pop-nasm
 	nasm -f bin $(1) -o $(2)
 endef
 
+.PHONY: default dev prod setup clean uefi uefi-prod uefi-build uefi-build-kernel uefi-build-apps uefi-run uefi-make-image uefi-run-image help
+
 default: dev
 
 dev: setup clean uefi
