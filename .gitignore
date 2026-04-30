@@ -13,6 +13,8 @@ uefi/
 */*.obj
 */*.o
 */*.pdb
+*/*.vhd
+*/*.img
 
 # gnu-efi includes
 include/
