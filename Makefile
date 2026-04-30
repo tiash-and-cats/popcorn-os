@@ -65,19 +65,23 @@ clean:
 	
 setup:
 	@if [ ! -f OVMF_CODE.fd ]; then \
-	    echo "getting OVMF_CODE.fd..."; \
+	    echo "getting OVMF_CODE.fd from https://qemu.weilnetz.de/test/ovmf/usr/share/OVMF/OVMF_CODE.fd..."; \
 	    curl -sSL "https://qemu.weilnetz.de/test/ovmf/usr/share/OVMF/OVMF_CODE.fd" -o OVMF_CODE.fd; \
 	fi
 	@if [ ! -f OVMF_VARS.fd ]; then \
-	    echo "getting OVMF_VARS.fd..."; \
+	    echo "getting OVMF_VARS.fd from https://qemu.weilnetz.de/test/ovmf/usr/share/OVMF/OVMF_VARS.fd..."; \
 	    curl -sSL "https://qemu.weilnetz.de/test/ovmf/usr/share/OVMF/OVMF_VARS.fd" -o OVMF_VARS.fd; \
 	fi
 	@if [ ! -d include ]; then \
-	    echo "getting gnu-efi includes..."; \
+	    echo "getting gnu-efi includes from https://github.com/ncroxon/gnu-efi/archive/refs/tags/4.0.4.tar.gz..."; \
 	    curl -sSL "https://github.com/ncroxon/gnu-efi/archive/refs/tags/4.0.4.tar.gz" -o gnu-efi.tgz; \
 	    tar xf gnu-efi.tgz gnu-efi-4.0.4/inc --strip-components=1; \
 	    mv inc include; \
 	    rm gnu-efi.tgz; \
+	fi
+	@if [ ! -f caramelized/stb_truetype.h ]; then \
+	    echo "getting stb_truetype.h from https://github.com/nothings/stb/raw/refs/heads/master/stb_truetype.h..."; \
+	    curl -sSL "https://github.com/nothings/stb/raw/refs/heads/master/stb_truetype.h" -o caramelized/stb_truetype.h \
 	fi
 
 uefi-build-kernel:
